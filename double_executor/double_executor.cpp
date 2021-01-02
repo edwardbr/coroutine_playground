@@ -59,8 +59,9 @@ struct message
 
 void print_message(bool is_host, const char* location, message& msg)
 {
-    printf("%s %s msg %d is request %d requires reply %d err_code %d command %s payload %s\n", (is_host ? "host" : "enclave"), location, msg.request_id,
-           msg.is_request, msg.requires_reply, msg.error_code, msg.command.c_str(), msg.payload.c_str());
+    printf("%s %s msg %d is request %d requires reply %d err_code %d command %s payload %s\n",
+           (is_host ? "host" : "enclave"), location, msg.request_id, msg.is_request, msg.requires_reply, msg.error_code,
+           msg.command.c_str(), msg.payload.c_str());
 }
 
 using resumable = cppcoro::task<message>;
@@ -160,8 +161,7 @@ public:
     message read_message_sync()
     {
         message m;
-        while (!finish_request && !control_reply_queue.pop(m)) 
-        {}
+        while (!finish_request && !control_reply_queue.pop(m)) { }
         print_message(host, "read_message_sync", m);
         return m;
     }
@@ -197,7 +197,7 @@ public:
         };
 
         m.request_id = ++unique_id;
-        //print_message(host, "send_message_async", m);
+        // print_message(host, "send_message_async", m);
 
         return send_awaitable {*this, m};
     }
@@ -232,7 +232,7 @@ public:
             m.request_id = ++unique_id;
         }
 
-        //print_message(host, "post_message_async", m);
+        // print_message(host, "post_message_async", m);
 
         return post_awaitable {*this, m};
     }
@@ -313,7 +313,7 @@ public:
                         else if (m.command == "double_echo")
                         {
                             it = resume_map.emplace(m.request_id, message_wrapper(m, double_echo));
-                        }                        
+                        }
                         else
                         {
                             m.error_code = 1; // we have a dodgy request so report is as such
@@ -329,7 +329,7 @@ public:
                         auto cb = callback_map.find(m.request_id);
                         if (cb == callback_map.end())
                         {
-                            if(is_host())
+                            if (is_host())
                             {
                                 while (!finish_request && !control_reply_queue.push(m)) { }
                             }
@@ -354,7 +354,7 @@ public:
                 }
                 while (host && control_send_queue.pop(m))
                 {
-                    //print_message(host, "control pop message", m);
+                    // print_message(host, "control pop message", m);
                     while (!reply_queue.push(m))
                     {
                         if (is_shutting_down())
@@ -371,7 +371,7 @@ public:
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
-//non coroutine
+// non coroutine
 message echo_world(message& m, executor& exec)
 {
     message msg = m;
@@ -381,7 +381,7 @@ message echo_world(message& m, executor& exec)
     return msg;
 }
 
-//a coroutine calling an awaitable
+// a coroutine calling an awaitable
 resumable ping(message& m, executor& exec)
 {
     message reply = m;
@@ -389,14 +389,14 @@ resumable ping(message& m, executor& exec)
     reply.requires_reply = false;
 
     {
-      message query {0, true, true, 0, "hello", "hello"};
-      auto ret = co_await exec.send_message_async(query);
-      reply.payload = "pong " + ret.payload;
+        message query {0, true, true, 0, "hello", "hello"};
+        auto ret = co_await exec.send_message_async(query);
+        reply.payload = "pong " + ret.payload;
     }
     co_return reply;
 }
 
-//coroutine calling another coroutine
+// coroutine calling another coroutine
 resumable double_echo(message& m, executor& exec)
 {
     message reply = m;
@@ -437,7 +437,7 @@ int main()
     }
     {
         message m;
-        while(count)
+        while (count)
         {
             message m = host_exec.read_message_sync();
             print_message(true, "main", m);
