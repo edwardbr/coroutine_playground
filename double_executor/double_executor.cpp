@@ -1,13 +1,11 @@
-#include <thread>
-#include <vector>
 #include <atomic>
-#include <string>
-#include <iostream>
-#include <functional>
-#include <unordered_map>
-#include <future>
 #include <chrono>
-#include <assert.h>
+#include <functional>
+#include <iostream>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include <cppcoro/task.hpp>
 using namespace std::chrono_literals;
@@ -68,59 +66,12 @@ using resumable = cppcoro::task<message>;
 
 ///////////////////////////////////////////////////////////
 
-class function_dispatcher
-{
-public:
-    struct promise_type
-    {
-        using coro_handle = cppcoro::coroutine_handle<promise_type>;
-        coro_handle get_return_object() { return coro_handle::from_promise(*this); }
-        auto initial_suspend() { return cppcoro::suspend_always(); }
-        auto final_suspend() noexcept { return cppcoro::suspend_always(); }
-        void return_void() { }
-        void unhandled_exception() { std::terminate(); }
-    };
-    using coro_handle = cppcoro::coroutine_handle<promise_type>;
-    function_dispatcher(coro_handle handle)
-        : handle_(handle)
-    {
-        assert(handle);
-    }
-    function_dispatcher(function_dispatcher&) = delete;
-    function_dispatcher(function_dispatcher&& other) { std::swap(handle_, other.handle_); }
-    bool resume()
-    {
-        if (!handle_.done())
-            handle_.resume();
-        return !handle_.done();
-    }
-    ~function_dispatcher()
-    {
-        if (handle_)
-        {
-            handle_.destroy();
-        }
-    }
-
-private:
-    coro_handle handle_;
-};
-
-///////////////////////////////////////////////////////////
-
-class executor;
-message echo_world(message& m, executor& exec);
-resumable double_echo(message& m, executor& exec);
-resumable ping(message& m, executor& exec);
-
-struct awaitable_message;
-
 class executor
 {
+    class function_dispatcher;
     using callback_lookup = std::unordered_map<int, std::function<void(message&)>>;
     using function_dispatcher_lookup = std::unordered_map<int, function_dispatcher>;
     using garbage_collection = std::vector<int>;
-    friend awaitable_message;
 
     callback_lookup callback_map;
     function_dispatcher_lookup resume_map;
@@ -132,13 +83,24 @@ class executor
     spsc_queue<message, 200> control_send_queue;
     spsc_queue<message, 200> control_reply_queue;
 
+public:
+    // this forward declaration needs to be
+    struct context;
+
+private:
+    std::function<bool(context&, message&)> command_set;
+
     bool& finish_request;
     std::atomic<int> unique_id = 0;
     bool host = true;
 
+    std::thread thread;
+
 public:
-    executor(bool is_host, spsc_queue<message, 200>& send_q, spsc_queue<message, 200>& receive_q, bool& finish_r)
-        : send_queue(send_q)
+    executor(bool is_host, std::function<bool(context&, message&)> commands, spsc_queue<message, 200>& send_q,
+             spsc_queue<message, 200>& receive_q, bool& finish_r)
+        : command_set(commands)
+        , send_queue(send_q)
         , reply_queue(receive_q)
         , finish_request(finish_r)
         , host(is_host)
@@ -162,71 +124,178 @@ public:
     {
         message m;
         while (!finish_request && !control_reply_queue.pop(m)) { }
-        print_message(host, "read_message_sync", m);
+        //print_message(host, "read_message_sync", m);
         return m;
     }
 
-    auto send_message_async(message& m)
+    bool is_shutting_down() { return finish_request; }
+
+    void start()
     {
-        struct send_awaitable
+        if (thread.get_id() == std::thread::id())
         {
-            executor& exec;
-            message& request_msg;
-            message response_msg;
-            bool await_ready() { return false; }
-            bool await_suspend(cppcoro::coroutine_handle<> h)
+            thread = std::thread([&]() {
+                while (!finish_request)
+                {
+                    message m;
+                    while (send_queue.pop(m))
+                    {
+                        //print_message(host, "pop message", m);
+                        if (m.is_request)
+                        {
+                            if (!command_set(context {*this}, m))
+                            {
+                                m.error_code = 1; // we have a dodgy request so report is as such
+                                m.payload = "command not recognised";
+                                m.is_request = false;
+                                while (!finish_request && !reply_queue.push(m)) { }
+                            }
+                        }
+                        else
+                        {
+                            auto cb = callback_map.find(m.request_id);
+                            if (cb == callback_map.end())
+                            {
+                                if (is_host())
+                                {
+                                    while (!finish_request && !control_reply_queue.push(m)) { }
+                                }
+                                else
+                                {
+                                    m.error_code = 1; // we have a dodgy request so report is as such
+                                    m.payload = "callback not recognised";
+                                    print_message(host, "callback not recognised", m);
+                                }
+                            }
+                            else
+                            {
+                                cb->second(m);
+                                callback_map.erase(cb);
+                            }
+                        }
+                        for (int i : garbage)
+                        {
+                            resume_map.erase(i);
+                        }
+                        garbage.clear();
+                    }
+                    while (host && control_send_queue.pop(m))
+                    {
+                        // print_message(host, "control pop message", m);
+                        while (!reply_queue.push(m))
+                        {
+                            if (is_shutting_down())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        else
+        {
+            assert(false);
+        }
+    }
+
+    void join()
+    {
+        if (thread.get_id() != std::thread::id())
+        {
+            thread.join();
+        }
+    }
+
+    struct context
+    {
+        executor& exec;
+        void execute_command(message& msg, std::function<resumable(message&, context&)> fd)
+        {
+            exec.execute_command(msg, fd);
+        }
+        void execute_command(message& msg, std::function<message(message&, context&)> fd)
+        {
+            exec.execute_command(msg, fd);
+        }
+        auto send_message_async(message& m) { return exec.send_message_async(m); }
+        auto post_message_async(message& m) { return exec.post_message_async(m); }
+    };
+
+private:
+    void execute_command(message& msg, std::function<resumable(message&, context&)> fd)
+    {
+        auto it = resume_map.emplace(msg.request_id, message_wrapper(msg, fd));
+        it.first->second.resume();
+    }
+
+    void execute_command(message& msg, std::function<message(message&, context&)> fd)
+    {
+        auto it = resume_map.emplace(msg.request_id, message_wrapper(msg, fd));
+        it.first->second.resume();
+    }
+
+    struct send_awaitable
+    {
+        executor& exec;
+        message& request_msg;
+        message response_msg;
+        bool await_ready() { return false; }
+        bool await_suspend(cppcoro::coroutine_handle<> h)
+        {
+            if (exec.is_shutting_down())
+            {
+                return false;
+            }
+            while (!exec.reply_queue.push(request_msg))
             {
                 if (exec.is_shutting_down())
                 {
                     return false;
                 }
-                while (!exec.reply_queue.push(request_msg))
-                {
-                    if (exec.is_shutting_down())
-                    {
-                        return false;
-                    }
-                }
-                exec.callback_map.emplace(request_msg.request_id, [h, this](message& m) {
-                    response_msg = m;
-                    h.resume();
-                });
-                return true;
             }
-            message await_resume() { return response_msg; }
-        };
+            exec.callback_map.emplace(request_msg.request_id, [h, this](message& m) {
+                response_msg = m;
+                h.resume();
+            });
+            return true;
+        }
+        message await_resume() { return response_msg; }
+    };
 
+    send_awaitable send_message_async(message& m)
+    {
         m.request_id = ++unique_id;
         // print_message(host, "send_message_async", m);
 
         return send_awaitable {*this, m};
     }
 
-    auto post_message_async(message& m)
+    struct post_awaitable
     {
-        struct post_awaitable
+        executor& exec;
+        message& request_msg;
+        bool await_ready() { return false; }
+        bool await_suspend(cppcoro::coroutine_handle<> h)
         {
-            executor& exec;
-            message& request_msg;
-            bool await_ready() { return false; }
-            bool await_suspend(cppcoro::coroutine_handle<> h)
+            if (exec.is_shutting_down())
+            {
+                return false;
+            }
+            while (!exec.reply_queue.push(request_msg))
             {
                 if (exec.is_shutting_down())
                 {
                     return false;
                 }
-                while (!exec.reply_queue.push(request_msg))
-                {
-                    if (exec.is_shutting_down())
-                    {
-                        return false;
-                    }
-                }
-                return false;
             }
-            void await_resume() { }
-        };
+            return false;
+        }
+        void await_resume() { }
+    };
 
+    post_awaitable post_message_async(message& m)
+    {
         if (m.is_request)
         {
             m.request_id = ++unique_id;
@@ -237,16 +306,52 @@ public:
         return post_awaitable {*this, m};
     }
 
-    bool is_shutting_down() { return finish_request; }
+    class function_dispatcher
+    {
+    public:
+        struct promise_type
+        {
+            using coro_handle = cppcoro::coroutine_handle<promise_type>;
+            coro_handle get_return_object() { return coro_handle::from_promise(*this); }
+            auto initial_suspend() { return cppcoro::suspend_always(); }
+            auto final_suspend() noexcept { return cppcoro::suspend_always(); }
+            void return_void() { }
+            void unhandled_exception() { std::terminate(); }
+        };
+        using coro_handle = cppcoro::coroutine_handle<promise_type>;
+        function_dispatcher(coro_handle handle)
+            : handle_(handle)
+        {
+            assert(handle);
+        }
+        function_dispatcher(function_dispatcher&) = delete;
+        function_dispatcher(function_dispatcher&& other) { std::swap(handle_, other.handle_); }
+        bool resume()
+        {
+            if (!handle_.done())
+                handle_.resume();
+            return !handle_.done();
+        }
+        ~function_dispatcher()
+        {
+            if (handle_)
+            {
+                handle_.destroy();
+            }
+        }
+
+    private:
+        coro_handle handle_;
+    };
 
     // for non awaitables
-    function_dispatcher message_wrapper(message& m, std::function<message(message&, executor&)> fn)
+    function_dispatcher message_wrapper(message& m, std::function<message(message&, context&)> fn)
     {
         auto message_id = m.request_id;
         bool requires_reply = m.requires_reply;
         try
         {
-            message ret = fn(m, *this);
+            message ret = fn(m, context {*this});
 
             if (requires_reply)
             {
@@ -266,13 +371,13 @@ public:
     }
 
     // for co_awaitables
-    function_dispatcher message_wrapper(message& m, std::function<resumable(message&, executor&)> fn)
+    function_dispatcher message_wrapper(message& m, std::function<resumable(message&, context&)> fn)
     {
         auto message_id = m.request_id;
         bool requires_reply = m.requires_reply;
         try
         {
-            auto ret = co_await fn(m, *this);
+            auto ret = co_await fn(m, context {*this});
 
             if (requires_reply)
             {
@@ -290,89 +395,13 @@ public:
         co_return;
     }
 
-    std::thread run_thread()
-    {
-        std::thread t([&]() {
-            while (!finish_request)
-            {
-                message m;
-                while (send_queue.pop(m))
-                {
-                    print_message(host, "pop message", m);
-                    if (m.is_request)
-                    {
-                        std::pair<function_dispatcher_lookup::iterator, bool> it;
-                        if (m.command == "hello")
-                        {
-                            it = resume_map.emplace(m.request_id, message_wrapper(m, echo_world));
-                        }
-                        else if (m.command == "ping")
-                        {
-                            it = resume_map.emplace(m.request_id, message_wrapper(m, ping));
-                        }
-                        else if (m.command == "double_echo")
-                        {
-                            it = resume_map.emplace(m.request_id, message_wrapper(m, double_echo));
-                        }
-                        else
-                        {
-                            m.error_code = 1; // we have a dodgy request so report is as such
-                            m.payload = "command not recognised";
-                            m.is_request = false;
-                            while (!finish_request && !reply_queue.push(m)) { }
-                        }
-
-                        it.first->second.resume();
-                    }
-                    else
-                    {
-                        auto cb = callback_map.find(m.request_id);
-                        if (cb == callback_map.end())
-                        {
-                            if (is_host())
-                            {
-                                while (!finish_request && !control_reply_queue.push(m)) { }
-                            }
-                            else
-                            {
-                                m.error_code = 1; // we have a dodgy request so report is as such
-                                m.payload = "callback not recognised";
-                                print_message(host, "callback not recognised", m);
-                            }
-                        }
-                        else
-                        {
-                            cb->second(m);
-                            callback_map.erase(cb);
-                        }
-                    }
-                    for (int i : garbage)
-                    {
-                        resume_map.erase(i);
-                    }
-                    garbage.clear();
-                }
-                while (host && control_send_queue.pop(m))
-                {
-                    // print_message(host, "control pop message", m);
-                    while (!reply_queue.push(m))
-                    {
-                        if (is_shutting_down())
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-        return t;
-    }
+    friend context;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
 // non coroutine
-message echo_world(message& m, executor& exec)
+message echo_world(message& m, executor::context& exec)
 {
     message msg = m;
     msg.payload += " world";
@@ -382,7 +411,7 @@ message echo_world(message& m, executor& exec)
 }
 
 // a coroutine calling an awaitable
-resumable ping(message& m, executor& exec)
+resumable ping(message& m, executor::context& exec)
 {
     message reply = m;
     reply.is_request = false;
@@ -397,7 +426,7 @@ resumable ping(message& m, executor& exec)
 }
 
 // coroutine calling another coroutine
-resumable double_echo(message& m, executor& exec)
+resumable double_echo(message& m, executor::context& exec)
 {
     message reply = m;
     reply.is_request = false;
@@ -413,11 +442,32 @@ int main()
     spsc_queue<message, 200> send_queue;
     spsc_queue<message, 200> reply_queue;
 
-    executor enclave_exec(false, send_queue, reply_queue, finish_request);
-    auto enclave_thread = enclave_exec.run_thread();
+    auto commands = [](executor::context& exec, message& m) -> bool {
+        if (m.command == "hello")
+        {
+            exec.execute_command(m, echo_world);
+        }
+        else if (m.command == "ping")
+        {
+            exec.execute_command(m, ping);
+        }
+        else if (m.command == "double_echo")
+        {
+            exec.execute_command(m, double_echo);
+        }
+        else
+        {
+            return false;
+        }
 
-    executor host_exec(true, reply_queue, send_queue, finish_request);
-    auto host_thread = host_exec.run_thread();
+        return true;
+    };
+
+    executor enclave_exec(false, commands, send_queue, reply_queue, finish_request);
+    enclave_exec.start();
+
+    executor host_exec(true, commands, reply_queue, send_queue, finish_request);
+    host_exec.start();
 
     int count = 0;
     {
@@ -447,8 +497,8 @@ int main()
 
     finish_request = true;
 
-    enclave_thread.join();
-    host_thread.join();
+    enclave_exec.join();
+    host_exec.join();
 
     return 0;
 }
