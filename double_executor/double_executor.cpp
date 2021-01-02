@@ -74,24 +74,24 @@ int main()
     int count = 0;
     {
         message m {0, true, true, 0, "hello", "hello"};
-        host_exec.send_message_sync(m);
+        host_exec.post_message(m);
         count++;
     }
     {
         message m {1, true, true, 0, "ping", ""};
-        host_exec.send_message_sync(m);
+        host_exec.post_message(m);
         count++;
     }
     {
         message m {1, true, true, 0, "double_echo", ""};
-        host_exec.send_message_sync(m);
+        host_exec.post_message(m);
         count++;
     }
     {
         message m;
         while (count)
         {
-            message m = host_exec.read_message_sync();
+            message m = host_exec.read_message();
             print_message(true, "main", m);
             count--;
         }

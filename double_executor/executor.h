@@ -79,16 +79,16 @@ public:
     bool has_recieved_calls() { return unique_id.load(std::memory_order_relaxed) != 0; }
     bool is_host() { return host; }
 
-    void send_message_sync(message& m)
+    void post_message(message& m)
     {
         m.request_id = ++unique_id;
 
-        print_message(host, "send_message_sync", m);
+        print_message(host, "post_message", m);
 
         while (!finish_request && !control_send_queue.push(m)) { }
     }
 
-    message read_message_sync()
+    message read_message()
     {
         message m;
         while (!finish_request && !control_reply_queue.pop(m)) { }
