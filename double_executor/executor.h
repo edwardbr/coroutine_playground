@@ -11,13 +11,23 @@
 #include <cppcoro/task.hpp>
 
 #include "queue.h"
+#include "bit_fiddler.h"
+
 using namespace std::chrono_literals;
+
+enum class message_flags
+{
+    request = 1,
+    requires_reply = 2,
+    continuation = 4
+};
+
+ENABLE_BITMASK_OPERATORS(message_flags)
 
 struct message
 {
     int request_id = 0;
-    bool is_request = true;
-    bool requires_reply = true;
+    message_flags flags = message_flags::request | message_flags::requires_reply;
     int error_code = 0;
     std::string command;
     std::string payload;
@@ -25,9 +35,16 @@ struct message
 
 void print_message(bool is_host, const char* location, message& msg)
 {
-    printf("%s %s msg %d is request %d requires reply %d err_code %d command %s payload %s\n",
-           (is_host ? "host" : "enclave"), location, msg.request_id, msg.is_request, msg.requires_reply, msg.error_code,
-           msg.command.c_str(), msg.payload.c_str());
+    printf("%s %s msg %d is request %d requires reply %d continuation %d err_code %d command %s payload %s\n",
+           (is_host ? "host" : "enclave"), 
+           location, 
+           msg.request_id, 
+           msg.flags & message_flags::request,
+           msg.flags & message_flags::requires_reply,
+           msg.flags & message_flags::continuation, 
+           msg.error_code,
+           msg.command.c_str(), 
+           msg.payload.c_str());
 }
 
 using resumable = cppcoro::task<message>;
@@ -65,8 +82,11 @@ private:
     std::thread thread;
 
 public:
-    executor(bool is_host, std::function<bool(context&, message&)> commands, spsc_queue<message, 200>& send_q,
-             spsc_queue<message, 200>& receive_q, bool& finish_r)
+    executor(bool is_host, 
+        std::function<bool(context&, message&)> commands, 
+        spsc_queue<message, 200>& send_q,
+        spsc_queue<message, 200>& receive_q, 
+        bool& finish_r)
         : command_set(commands)
         , send_queue(send_q)
         , reply_queue(receive_q)
@@ -109,13 +129,13 @@ public:
                     while (send_queue.pop(m))
                     {
                         // print_message(host, "pop message", m);
-                        if (m.is_request)
+                        if (*(m.flags & message_flags::request))
                         {
                             if (!command_set(context {*this}, m))
                             {
                                 m.error_code = 1; // we have a dodgy request so report is as such
                                 m.payload = "command not recognised";
-                                m.is_request = false;
+                                m.flags &= ~message_flags::request;
                                 while (!finish_request && !reply_queue.push(m)) { }
                             }
                         }
@@ -264,7 +284,7 @@ private:
 
     post_awaitable post_message_async(message& m)
     {
-        if (m.is_request)
+        if (*(m.flags & message_flags::request))
         {
             m.request_id = ++unique_id;
         }
@@ -316,15 +336,14 @@ private:
     function_dispatcher message_wrapper(message& m, std::function<message(message&, context&)> fn)
     {
         auto message_id = m.request_id;
-        bool requires_reply = m.requires_reply;
+        bool requires_reply = *(m.flags & message_flags::requires_reply);
         try
         {
             message ret = fn(m, context {*this});
 
             if (requires_reply)
             {
-                ret.is_request = false;
-                ret.requires_reply = false;
+                ret.flags &= ~(message_flags::request | message_flags::requires_reply);
                 co_await this->post_message_async(ret);
             }
         }
@@ -342,15 +361,14 @@ private:
     function_dispatcher message_wrapper(message& m, std::function<resumable(message&, context&)> fn)
     {
         auto message_id = m.request_id;
-        bool requires_reply = m.requires_reply;
+        bool requires_reply = *(m.flags & message_flags::requires_reply);
         try
         {
             auto ret = co_await fn(m, context {*this});
 
             if (requires_reply)
             {
-                ret.is_request = false;
-                ret.requires_reply = false;
+                ret.flags &= ~(message_flags::request | message_flags::requires_reply);
                 co_await this->post_message_async(ret);
             }
         }

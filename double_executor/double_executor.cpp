@@ -7,8 +7,8 @@ message echo_world(message& m, executor::context& exec)
 {
     message msg = m;
     msg.payload += " world";
-    msg.is_request = false;
-    msg.requires_reply = false;
+    msg.flags &= ~message_flags::request;
+    msg.flags &= ~message_flags::requires_reply;
     return msg;
 }
 
@@ -16,11 +16,11 @@ message echo_world(message& m, executor::context& exec)
 resumable ping(message& m, executor::context& exec)
 {
     message reply = m;
-    reply.is_request = false;
-    reply.requires_reply = false;
+    reply.flags &= ~message_flags::request;
+    reply.flags &= ~message_flags::requires_reply;
 
     {
-        message query {0, true, true, 0, "hello", "hello"};
+        message query {0, message_flags::request | message_flags::requires_reply, 0, "hello", "hello"};
         auto ret = co_await exec.send_message_async(query);
         reply.payload = "pong " + ret.payload;
     }
@@ -31,8 +31,8 @@ resumable ping(message& m, executor::context& exec)
 resumable double_echo(message& m, executor::context& exec)
 {
     message reply = m;
-    reply.is_request = false;
-    reply.requires_reply = false;
+    reply.flags &= ~message_flags::request;
+    reply.flags &= ~message_flags::requires_reply;
 
     message ret = co_await ping(m, exec);
     co_return reply;
@@ -73,17 +73,17 @@ int main()
 
     int count = 0;
     {
-        message m {0, true, true, 0, "hello", "hello"};
+        message m {0, message_flags::request | message_flags::requires_reply, 0, "hello", "hello"};
         host_exec.post_message(m);
         count++;
     }
     {
-        message m {1, true, true, 0, "ping", ""};
+        message m {1, message_flags::request | message_flags::requires_reply, 0, "ping", ""};
         host_exec.post_message(m);
         count++;
     }
     {
-        message m {1, true, true, 0, "double_echo", ""};
+        message m {1, message_flags::request | message_flags::requires_reply, 0, "double_echo", ""};
         host_exec.post_message(m);
         count++;
     }
