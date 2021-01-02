@@ -8,36 +8,23 @@ using execution_context = executor::context;
 using resumable = executor::resumable;
 
 // non coroutine
-message echo_world(message& m, execution_context& exec)
+executor::return_type echo_world(std::string& payload, execution_context& exec)
 {
-    message msg = m;
-    msg.payload += " world";
-    msg.flags &= ~(coro_exec::message_flags::request | coro_exec::message_flags::requires_reply);
-    return msg;
+    return {payload += " world", 0};
 }
 
 // a coroutine calling an awaitable
-resumable ping(message& m, execution_context& exec)
+resumable ping(std::string& payload, execution_context& exec)
 {
-    message reply = m;
-    reply.flags &= ~(coro_exec::message_flags::request | coro_exec::message_flags::requires_reply);
-
-    {
-        message query {0, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "hello", "hello"};
-        auto ret = co_await exec.send_message_async(query);
-        reply.payload = "pong " + ret.payload;
-    }
-    co_return reply;
+    executor::return_type ret = co_await exec.send_message_async(std::string("hello"), std::string("hello"));
+    co_return executor::return_type{std::string("pong ") + ret.first, 0};
 }
 
 // coroutine calling another coroutine
-resumable double_echo(message& m, execution_context& exec)
+resumable double_echo(std::string& payload, execution_context& exec)
 {
-    message reply = m;
-    reply.flags &= ~(coro_exec::message_flags::request | coro_exec::message_flags::requires_reply);
-
-    message ret = co_await ping(m, exec);
-    co_return reply;
+    executor::return_type reply = co_await ping(payload, exec);
+    co_return executor::return_type{reply.first, 0};
 }
 
 int main()

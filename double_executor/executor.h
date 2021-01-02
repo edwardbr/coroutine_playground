@@ -68,8 +68,11 @@ namespace coro_exec
     {
     public:
         class function_dispatcher;
+        using command_type = COMMAND_TYPE;
+        using payload_type = PAYLOAD_TYPE;
+        using return_type = std::pair<payload_type, int>;
         using message_type = message<COMMAND_TYPE, PAYLOAD_TYPE>;
-        using resumable = cppcoro::task<message_type>;
+        using resumable = cppcoro::task<return_type>;
         using callback_lookup = std::unordered_map<int, std::function<void(message_type&)>>;
         using function_dispatcher_lookup = std::unordered_map<int, function_dispatcher>;
         using garbage_collection = std::vector<int>;
@@ -216,26 +219,26 @@ namespace coro_exec
         struct context
         {
             executor& exec;
-            void execute_command(message_type& msg, std::function<resumable(message_type&, context&)> fd)
+            void execute_command(message_type& msg, std::function<resumable(PAYLOAD_TYPE&, context&)> fd)
             {
                 exec.execute_command(msg, fd);
             }
-            void execute_command(message_type& msg, std::function<message_type(message_type&, context&)> fd)
+            void execute_command(message_type& msg, std::function<return_type(PAYLOAD_TYPE&, context&)> fd)
             {
                 exec.execute_command(msg, fd);
             }
-            auto send_message_async(message_type& m) { return exec.send_message_async(m); }
-            auto post_message_async(message_type& m) { return exec.post_message_async(m); }
+            auto send_message_async(COMMAND_TYPE& c, PAYLOAD_TYPE& p) { return exec.send_message_async(c, p); }
+            auto post_message_async(COMMAND_TYPE& c, PAYLOAD_TYPE& p) { return exec.post_message_async(c, p); }
         };
 
     private:
-        void execute_command(message_type& msg, std::function<resumable(message_type&, context&)> fd)
+        void execute_command(message_type& msg, std::function<resumable(PAYLOAD_TYPE&, context&)> fd)
         {
             auto it = resume_map.emplace(msg.request_id, message_wrapper(msg, fd));
             it.first->second.resume();
         }
 
-        void execute_command(message_type& msg, std::function<message_type(message_type&, context&)> fd)
+        void execute_command(message_type& msg, std::function<return_type(PAYLOAD_TYPE&, context&)> fd)
         {
             auto it = resume_map.emplace(msg.request_id, message_wrapper(msg, fd));
             it.first->second.resume();
@@ -244,8 +247,8 @@ namespace coro_exec
         struct send_awaitable
         {
             executor& exec;
-            message_type& request_msg;
-            message_type response_msg;
+            message_type request_msg;
+            return_type response_msg;
             bool await_ready() { return false; }
             bool await_suspend(cppcoro::coroutine_handle<> h)
             {
@@ -261,17 +264,18 @@ namespace coro_exec
                     }
                 }
                 exec.callback_map.emplace(request_msg.request_id, [h, this](message_type& m) {
-                    response_msg = m;
+                    response_msg = return_type(m.payload, m.error_code);
                     h.resume();
                 });
                 return true;
             }
-            message_type await_resume() { return response_msg; }
+            return_type await_resume() { return response_msg; }
         };
 
-        send_awaitable send_message_async(message_type& m)
+        send_awaitable send_message_async(COMMAND_TYPE& c, PAYLOAD_TYPE& p)
         {
-            m.request_id = ++unique_id;
+            message_type m {++unique_id, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply,
+                            0, c, p};
             // print_message(host, "send_message_async", m);
 
             return send_awaitable {*this, m};
@@ -351,18 +355,20 @@ namespace coro_exec
         };
 
         // for non awaitables
-        function_dispatcher message_wrapper(message_type& m, std::function<message_type(message_type&, context&)> fn)
+        function_dispatcher message_wrapper(message_type& m, std::function<return_type(PAYLOAD_TYPE&, context&)> fn)
         {
             auto message_id = m.request_id;
-            bool requires_reply = *(m.flags & message_flags::requires_reply);
+            message_type reply = m;
             try
             {
-                message_type ret = fn(m, context {*this});
+                return_type ret = fn(m.payload, context {*this});
 
-                if (requires_reply)
+                if (*(reply.flags & message_flags::requires_reply))
                 {
-                    ret.flags &= ~(message_flags::request | message_flags::requires_reply);
-                    co_await this->post_message_async(ret);
+                    reply.payload = ret.first;
+                    reply.error_code = ret.second;
+                    reply.flags &= ~(message_flags::request | message_flags::requires_reply);
+                    co_await this->post_message_async(reply);
                 }
             }
             catch (...)
@@ -376,18 +382,20 @@ namespace coro_exec
         }
 
         // for co_awaitables
-        function_dispatcher message_wrapper(message_type& m, std::function<resumable(message_type&, context&)> fn)
+        function_dispatcher message_wrapper(message_type& m, std::function<resumable(PAYLOAD_TYPE&, context&)> fn)
         {
             auto message_id = m.request_id;
-            bool requires_reply = *(m.flags & message_flags::requires_reply);
+            message_type reply = m;
             try
             {
-                auto ret = co_await fn(m, context {*this});
+                return_type ret = co_await fn(m.payload, context {*this});
 
-                if (requires_reply)
+                if (*(reply.flags & message_flags::requires_reply))
                 {
-                    ret.flags &= ~(message_flags::request | message_flags::requires_reply);
-                    co_await this->post_message_async(ret);
+                    reply.payload = ret.first;
+                    reply.error_code = ret.second;
+                    reply.flags &= ~(message_flags::request | message_flags::requires_reply);
+                    co_await this->post_message_async(reply);
                 }
             }
             catch (...)
