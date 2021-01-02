@@ -29,6 +29,7 @@ namespace coro_exec
 
     enum class message_flags
     {
+        null = 0,
         request = 1,
         requires_reply = 2,
         continuation = 4
@@ -63,7 +64,7 @@ namespace coro_exec
 
     ///////////////////////////////////////////////////////////
 
-    template<typename COMMAND_TYPE, typename PAYLOAD_TYPE> 
+    template<typename COMMAND_TYPE, typename PAYLOAD_TYPE, int QUEUE_SIZE = 200> 
     class executor
     {
     public:
@@ -82,12 +83,12 @@ namespace coro_exec
         callback_lookup callback_map;
         function_dispatcher_lookup resume_map;
         garbage_collection garbage;
-        spsc_queue<message_type, 200>& send_queue;
-        spsc_queue<message_type, 200>& reply_queue;
+        spsc_queue<message_type, QUEUE_SIZE>& send_queue;
+        spsc_queue<message_type, QUEUE_SIZE>& reply_queue;
 
         // only used by the host
-        spsc_queue<message_type, 200> control_send_queue;
-        spsc_queue<message_type, 200> control_reply_queue;
+        spsc_queue<message_type, QUEUE_SIZE> control_send_queue;
+        spsc_queue<message_type, QUEUE_SIZE> control_reply_queue;
 
     public:
         // this forward declaration needs to be
@@ -105,8 +106,8 @@ namespace coro_exec
     public:
         executor(bool is_host, 
             std::function<bool(context&, message_type&)> commands, 
-            spsc_queue<message_type, 200>& send_q,
-            spsc_queue<message_type, 200>& receive_q, 
+            spsc_queue<message_type, QUEUE_SIZE>& send_q,
+            spsc_queue<message_type, QUEUE_SIZE>& receive_q, 
             bool& finish_r)
             : command_set(commands)
             , send_queue(send_q)
@@ -120,11 +121,20 @@ namespace coro_exec
         bool has_recieved_calls() { return unique_id.load(std::memory_order_relaxed) != 0; }
         bool is_host() { return host; }
 
-        void post_message(message_type& m)
+        void post_message(command_type& command, payload_type& payload)
         {
-            m.request_id = ++unique_id;
+            message_type m {++unique_id, message_flags::request, 0, command, payload};
 
             print_message(host, "post_message", m);
+
+            while (!finish_request && !control_send_queue.push(m)) { }
+        }
+
+        void send_message(command_type& command, payload_type& payload)
+        {
+            message_type m {++unique_id, message_flags::request | message_flags::requires_reply, 0, command, payload};
+
+            print_message(host, "send_message", m);
 
             while (!finish_request && !control_send_queue.push(m)) { }
         }
@@ -304,14 +314,19 @@ namespace coro_exec
             void await_resume() { }
         };
 
-        post_awaitable post_message_async(message_type& m)
+        post_awaitable post_message_async(COMMAND_TYPE& command, PAYLOAD_TYPE& payload, int err_code)
         {
-            if (*(m.flags & message_flags::request))
-            {
-                m.request_id = ++unique_id;
-            }
 
+            message_type m {++unique_id, message_flags::request, err_code, command, payload}
             // print_message(host, "post_message_async", m);
+
+            return post_awaitable {*this, m};
+        }
+
+        post_awaitable post_reply_async(message_type& m)
+        {
+            // print_message(host, "post_reply_async", m);
+            m.flags &= ~(message_flags::request | message_flags::requires_reply);
 
             return post_awaitable {*this, m};
         }
@@ -355,55 +370,49 @@ namespace coro_exec
         };
 
         // for non awaitables
+        // note m is message_type& reference is ok as this is synchronous
         function_dispatcher message_wrapper(message_type& m, std::function<return_type(PAYLOAD_TYPE&, context&)> fn)
         {
-            auto message_id = m.request_id;
-            message_type reply = m;
             try
             {
                 return_type ret = fn(m.payload, context {*this});
 
-                if (*(reply.flags & message_flags::requires_reply))
+                if (*(m.flags & message_flags::requires_reply))
                 {
-                    reply.payload = ret.first;
-                    reply.error_code = ret.second;
-                    reply.flags &= ~(message_flags::request | message_flags::requires_reply);
-                    co_await this->post_message_async(reply);
+                    message_type reply {m.request_id, message_flags::null, ret.second, m.command, ret.first};
+                    co_await this->post_reply_async(reply);
                 }
             }
             catch (...)
             {
-                garbage.push_back(message_id);
+                garbage.push_back(m.request_id);
                 throw;
             }
 
-            garbage.push_back(message_id);
+            garbage.push_back(m.request_id);
             co_return;
         }
 
         // for co_awaitables
-        function_dispatcher message_wrapper(message_type& m, std::function<resumable(PAYLOAD_TYPE&, context&)> fn)
+        // note m is message_type value is ok as this is asynchronous and m needs to be cached
+        function_dispatcher message_wrapper(message_type m, std::function<resumable(PAYLOAD_TYPE&, context&)> fn)
         {
-            auto message_id = m.request_id;
-            message_type reply = m;
             try
             {
                 return_type ret = co_await fn(m.payload, context {*this});
 
-                if (*(reply.flags & message_flags::requires_reply))
+                if (*(m.flags & message_flags::requires_reply))
                 {
-                    reply.payload = ret.first;
-                    reply.error_code = ret.second;
-                    reply.flags &= ~(message_flags::request | message_flags::requires_reply);
-                    co_await this->post_message_async(reply);
+                    message_type reply {m.request_id, message_flags::null, ret.second, m.command, ret.first};
+                    co_await this->post_reply_async(reply);
                 }
             }
             catch (...)
             {
-                garbage.push_back(message_id);
+                garbage.push_back(m.request_id);
                 throw;
             }
-            garbage.push_back(message_id);
+            garbage.push_back(m.request_id);
             co_return;
         }
 

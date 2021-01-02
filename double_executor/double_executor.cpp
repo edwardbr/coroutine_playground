@@ -6,9 +6,10 @@ using executor = coro_exec::executor<std::string, std::string>;
 using message = executor::message_type;
 using execution_context = executor::context;
 using resumable = executor::resumable;
+using return_value = executor::return_type;
 
 // non coroutine
-executor::return_type echo_world(std::string& payload, execution_context& exec)
+return_value echo_world(std::string& payload, execution_context& exec)
 {
     return {payload += " world", 0};
 }
@@ -16,15 +17,27 @@ executor::return_type echo_world(std::string& payload, execution_context& exec)
 // a coroutine calling an awaitable
 resumable ping(std::string& payload, execution_context& exec)
 {
-    executor::return_type ret = co_await exec.send_message_async(std::string("hello"), std::string("hello"));
-    co_return executor::return_type{std::string("pong ") + ret.first, 0};
+    auto ret = co_await exec.send_message_async(std::string("hello"), std::string("hello"));
+    co_return return_value {std::string("pong ") + ret.first, 0};
 }
 
 // coroutine calling another coroutine
 resumable double_echo(std::string& payload, execution_context& exec)
 {
-    executor::return_type reply = co_await ping(payload, exec);
-    co_return executor::return_type{reply.first, 0};
+    auto reply = co_await ping(payload, exec);
+    co_return return_value {reply.first, 0};
+}
+
+cppcoro::task<int> forty_two()
+{
+    co_return 42;
+}
+
+// coroutine calling task<int> coroutine
+resumable do_forty_two(std::string& payload, execution_context& exec)
+{
+    auto reply = co_await forty_two();
+    co_return return_value {std::to_string(reply), 0};
 }
 
 int main()
@@ -46,6 +59,10 @@ int main()
         {
             exec.execute_command(m, double_echo);
         }
+        else if (m.command == "42")
+        {
+            exec.execute_command(m, do_forty_two);
+        }
         else
         {
             return false;
@@ -62,18 +79,19 @@ int main()
 
     int count = 0;
     {
-        message m {0, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "hello", "hello"};
-        host_exec.post_message(m);
+        host_exec.send_message(std::string("hello"), std::string("hello"));
         count++;
     }
     {
-        message m {1, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "ping", ""};
-        host_exec.post_message(m);
+        host_exec.send_message(std::string("ping"), std::string(""));
         count++;
     }
     {
-        message m {1, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "double_echo", ""};
-        host_exec.post_message(m);
+        host_exec.send_message(std::string("double_echo"), std::string(""));
+        count++;
+    }
+    {
+        host_exec.send_message(std::string("42"), std::string(""));
         count++;
     }
     {
