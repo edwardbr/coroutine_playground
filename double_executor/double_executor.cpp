@@ -2,25 +2,28 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////
 
+using executor = coro_exec::executor<std::string, std::string>;
+using message = executor::message_type;
+using execution_context = executor::context;
+using resumable = executor::resumable;
+
 // non coroutine
-message echo_world(message& m, executor::context& exec)
+message echo_world(message& m, execution_context& exec)
 {
     message msg = m;
     msg.payload += " world";
-    msg.flags &= ~message_flags::request;
-    msg.flags &= ~message_flags::requires_reply;
+    msg.flags &= ~(coro_exec::message_flags::request | coro_exec::message_flags::requires_reply);
     return msg;
 }
 
 // a coroutine calling an awaitable
-resumable ping(message& m, executor::context& exec)
+resumable ping(message& m, execution_context& exec)
 {
     message reply = m;
-    reply.flags &= ~message_flags::request;
-    reply.flags &= ~message_flags::requires_reply;
+    reply.flags &= ~(coro_exec::message_flags::request | coro_exec::message_flags::requires_reply);
 
     {
-        message query {0, message_flags::request | message_flags::requires_reply, 0, "hello", "hello"};
+        message query {0, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "hello", "hello"};
         auto ret = co_await exec.send_message_async(query);
         reply.payload = "pong " + ret.payload;
     }
@@ -28,11 +31,10 @@ resumable ping(message& m, executor::context& exec)
 }
 
 // coroutine calling another coroutine
-resumable double_echo(message& m, executor::context& exec)
+resumable double_echo(message& m, execution_context& exec)
 {
     message reply = m;
-    reply.flags &= ~message_flags::request;
-    reply.flags &= ~message_flags::requires_reply;
+    reply.flags &= ~(coro_exec::message_flags::request | coro_exec::message_flags::requires_reply);
 
     message ret = co_await ping(m, exec);
     co_return reply;
@@ -44,7 +46,7 @@ int main()
     spsc_queue<message, 200> send_queue;
     spsc_queue<message, 200> reply_queue;
 
-    auto commands = [](executor::context& exec, message& m) -> bool {
+    auto commands = [](execution_context& exec, message& m) -> bool {
         if (m.command == "hello")
         {
             exec.execute_command(m, echo_world);
@@ -73,17 +75,17 @@ int main()
 
     int count = 0;
     {
-        message m {0, message_flags::request | message_flags::requires_reply, 0, "hello", "hello"};
+        message m {0, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "hello", "hello"};
         host_exec.post_message(m);
         count++;
     }
     {
-        message m {1, message_flags::request | message_flags::requires_reply, 0, "ping", ""};
+        message m {1, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "ping", ""};
         host_exec.post_message(m);
         count++;
     }
     {
-        message m {1, message_flags::request | message_flags::requires_reply, 0, "double_echo", ""};
+        message m {1, coro_exec::message_flags::request | coro_exec::message_flags::requires_reply, 0, "double_echo", ""};
         host_exec.post_message(m);
         count++;
     }
