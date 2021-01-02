@@ -125,7 +125,7 @@ namespace coro_exec
         {
             message_type m {++unique_id, message_flags::request, 0, command, payload};
 
-            print_message(host, "post_message", m);
+            //print_message(host, "post_message", m);
 
             while (!finish_request && !control_send_queue.push(m)) { }
         }
@@ -134,7 +134,7 @@ namespace coro_exec
         {
             message_type m {++unique_id, message_flags::request | message_flags::requires_reply, 0, command, payload};
 
-            print_message(host, "send_message", m);
+            //print_message(host, "send_message", m);
 
             while (!finish_request && !control_send_queue.push(m)) { }
         }

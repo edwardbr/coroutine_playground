@@ -18,14 +18,17 @@ return_value echo_world(std::string& payload, execution_context& exec)
 resumable ping(std::string& payload, execution_context& exec)
 {
     auto ret = co_await exec.send_message_async(std::string("hello"), std::string("hello"));
-    co_return return_value {std::string("pong ") + ret.first, 0};
+    if (ret.second)
+        co_return return_value {"something went wrong", ret.second};
+    else
+        co_return return_value {std::string("pong ") + ret.first, 0};
 }
 
 // coroutine calling another coroutine
 resumable double_echo(std::string& payload, execution_context& exec)
 {
-    auto reply = co_await ping(payload, exec);
-    co_return return_value {reply.first, 0};
+    //funky but works!
+    co_return co_await ping(payload, exec);
 }
 
 cppcoro::task<int> forty_two()
@@ -38,6 +41,17 @@ resumable do_forty_two(std::string& payload, execution_context& exec)
 {
     auto reply = co_await forty_two();
     co_return return_value {std::to_string(reply), 0};
+}
+
+// coroutine calling another coroutine
+resumable stress_test(std::string& payload, execution_context& exec)
+{
+    auto ret = co_await ping(payload, exec);
+    for (auto i = 0; i < 10000;i++)
+    {
+        co_await ping(payload, exec);
+    }
+    co_return ret;
 }
 
 int main()
@@ -62,6 +76,10 @@ int main()
         else if (m.command == "42")
         {
             exec.execute_command(m, do_forty_two);
+        }
+        else if (m.command == "stress")
+        {
+            exec.execute_command(m, stress_test);
         }
         else
         {
@@ -92,6 +110,10 @@ int main()
     }
     {
         host_exec.send_message(std::string("42"), std::string(""));
+        count++;
+    }
+    {
+        host_exec.send_message(std::string("stress"), std::string(""));
         count++;
     }
     {
